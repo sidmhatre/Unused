@@ -34,6 +34,7 @@
     NSArray *_projectImageFiles;
     NSMutableArray *_results;
     NSMutableArray *_retinaImagePaths;
+    NSMutableArray *_searchedImagePaths;
     
     NSOperationQueue *_queue;
     BOOL isSearching;
@@ -136,27 +137,40 @@
                 if (isValidImage) {
                     // Grab the file name
                     NSString *imageName = [imagePath lastPathComponent];
+                    NSString* primaryImageName = [self getPrimaryImageName:imagePath];
 
                     // Settings items
                     NSArray *settingsItems = [self searchSettings];
                     BOOL isSearchCancelled = NO;
-                    for (NSString *extension in settingsItems) {
-     
+                    
+                    isSearchCancelled = [self isSubImageSet: primaryImageName : imageName];
+                    
+                    if (!isSearchCancelled) {
+                        
                         // Run the check
-                        if (!isSearchCancelled && [self occurancesOfImageNamed:imageName atDirectory:searchPath inFileExtensionType:extension]) {
+                        if (!isSearchCancelled && ![primaryImageName isEqualToString:@""] && [self occurancesOfImageNamed:primaryImageName atDirectory:searchPath inFileExtensionType:settingsItems]) {
+                            [_searchedImagePaths addObject:primaryImageName];
                             isSearchCancelled = YES;
                         }
+                        
+                        // Run the check
+                        if (!isSearchCancelled && [self occurancesOfImageNamed:imageName atDirectory:searchPath inFileExtensionType:settingsItems]) {
+                            [_searchedImagePaths addObject:imageName];
+                            isSearchCancelled = YES;
+                        }
+                        
+                        // Is it not found - update results
+                        if (!isSearchCancelled)
+                            dispatch_async(dispatch_get_main_queue(), ^{
+                                if (![primaryImageName isEqualToString:@""]) {
+                                    [_searchedImagePaths addObject:primaryImageName];
+                                }
+                                [_searchedImagePaths addObject:imageName];
+                                if (self.delegate && [self.delegate respondsToSelector:@selector(searcher:didFindUnusedImage:)]) {
+                                    [self.delegate searcher:self didFindUnusedImage:imagePath];
+                                }
+                            });
                     }
-                    
-                    // Is it not found - update results
-                    if (!isSearchCancelled)
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            
-                            if (self.delegate && [self.delegate respondsToSelector:@selector(searcher:didFindUnusedImage:)]) {
-                                [self.delegate searcher:self didFindUnusedImage:imagePath];
-                            }
-                            
-                        });
                 }
             }
         });
@@ -175,6 +189,29 @@
             [_fileData removeAllObjects];
         });
     });
+}
+
+-(NSString *)getPrimaryImageName : (NSString *) imagePath {
+    NSArray* spliteArray = [imagePath componentsSeparatedByString: @"/"];
+    NSString* primaryImageName = @"";
+
+    if (spliteArray.count - 2 >= 0 && spliteArray[spliteArray.count - 2] != nil) {
+        primaryImageName = spliteArray[spliteArray.count - 2];
+        NSArray* spliteArray = [primaryImageName componentsSeparatedByString: @"."];
+        if (spliteArray.count > 1) {
+            primaryImageName = spliteArray.firstObject;
+        } else {
+            primaryImageName = @"";
+        }
+    }
+    return primaryImageName;
+}
+
+- (BOOL) isSubImageSet : (NSString *) primaryImageName : (NSString *) subSetImageName {
+    if ([_searchedImagePaths containsObject: primaryImageName] || [_searchedImagePaths containsObject: subSetImageName]) {
+        return YES;
+    }
+    return false;
 }
 
 - (NSArray *)searchSettings {
@@ -249,17 +286,22 @@
     return !(isThirdPartyBundle && isNamedDefault && isNamedIcon && isUniversalImage);
 }
 
-- (int)occurancesOfImageNamed:(NSString *)imageName atDirectory:(NSString *)directoryPath inFileExtensionType:(NSString *)extension {
-    [_fileDataLock lock];
+- (int)occurancesOfImageNamed:(NSString *)imageName atDirectory:(NSString *)directoryPath inFileExtensionType:(NSArray *)extensions {
     
+
+    [_fileDataLock lock];
     NSData *data = [_fileData objectForKey:directoryPath];
     if (!data) {
         NSTask *task = [[NSTask alloc] init];
         [task setLaunchPath: @"/bin/sh"];
         
         // Setup the call
-        NSString *cmd = [NSString stringWithFormat:@"for filename in `find %@ -name '*.%@'`; do cat $filename 2>/dev/null | grep -o %@ ; done", directoryPath, extension, [imageName stringByDeletingPathExtension]];
+        NSString *cmd = @"";
+        for (NSString *extension in extensions) {
+            cmd = [NSString stringWithFormat:@"%@ %@ for filename in `find %@ -name '*.%@'`; do cat $filename 2>/dev/null | grep -o %@ ; done", cmd, [cmd isEqualToString:@""] ? @"" : @";", directoryPath, extension, [imageName stringByDeletingPathExtension]];
+        }
         NSLog(@"%@", cmd);
+
         NSArray *argvals = [NSArray arrayWithObjects: @"-c", cmd, nil];
         [task setArguments: argvals];
         
@@ -274,7 +316,6 @@
         
         [_fileData setObject:data forKey:key];
     }
-    
     [_fileDataLock unlock];
     
     NSString *string = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
